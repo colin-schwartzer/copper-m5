@@ -11,6 +11,7 @@ import {
   type LangfuseGeneration,
   type LangfuseSpan,
   type LangfuseTool,
+  LangfuseOtelSpanAttributes,
   propagateAttributes,
   setLangfuseTracerProvider,
   startObservation,
@@ -77,6 +78,8 @@ export type TurnInfo = {
   sessionId?: string;
   tags?: string[];
   metadata?: Record<string, string | number | boolean>;
+  /** Turns on Langfuse sharing, so anyone with the link can open the trace. */
+  public?: boolean;
 };
 
 /**
@@ -86,7 +89,7 @@ export type TurnInfo = {
 export function startTurn(info: TurnInfo): LangfuseSpan | undefined {
   if (!ensureTracing()) return undefined;
   try {
-    return propagateAttributes(
+    const turn = propagateAttributes(
       {
         traceName: info.name,
         sessionId: info.sessionId,
@@ -100,6 +103,9 @@ export function startTurn(info: TurnInfo): LangfuseSpan | undefined {
       () =>
         startObservation(info.name, { input: info.input }, { asType: "span" }),
     );
+    if (info.public)
+      turn.otelSpan.setAttribute(LangfuseOtelSpanAttributes.TRACE_PUBLIC, true);
+    return turn;
   } catch {
     return undefined;
   }
