@@ -284,6 +284,24 @@ writeFileSync(
   `evals/results/${stamp}.json`,
   JSON.stringify({ stamp, minPassRate, gate: gateArg, summaries }, null, 2),
 );
+// In GitHub Actions, annotations show the scores on the pull request's Checks
+// tab and on the check itself, so a reviewer sees them without opening Langfuse.
+if (process.env.GITHUB_ACTIONS) {
+  const oneLine = (text: string) => text.split(/\s+/).join(" ");
+  for (const row of lines.slice(2)) {
+    const [, setup, passed, rate, acc, pol, cost, time] = row
+      .split("|")
+      .map((c) => c.trim());
+    console.log(
+      `::notice title=Golden-set eval (${setup})::passed ${passed} (${rate}), accuracy ${acc}, policy ${pol}, agent cost ${cost}, ${time} per answer`,
+    );
+  }
+  for (const s of summaries)
+    for (const r of s.results.filter((x) => !x.passed))
+      console.log(
+        `::warning title=Failed question (${s.mode})::${oneLine(`${r.id}: ${r.checks.failures.join("; ") || r.verdict?.reasoning || r.judgeError || "failed"}`)}`,
+      );
+}
 if (process.env.GITHUB_STEP_SUMMARY) {
   appendFileSync(
     process.env.GITHUB_STEP_SUMMARY,
