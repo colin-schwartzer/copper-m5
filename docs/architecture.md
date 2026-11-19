@@ -171,3 +171,45 @@ the tests and a golden-set evaluation with an AI judge run in GitHub Actions
 on every pull request, with `main` protected; every AI call is traced in
 Langfuse; and one support agent that does everything is compared with the two
 agents on the same golden set. Langfuse is the only eval and monitoring tool.
+
+## Module 5: Safe to ship (CI, tracing, AI judge, single vs two agents)
+
+**Summary:** Four things that make Ask Copper safe to change and to run.
+The tests and a golden-set evaluation run in GitHub Actions on every pull
+request, and `main` is protected so a failing check blocks the merge. Every
+chat turn is traced in Langfuse. An AI judge grades the golden set, with the
+scores in Langfuse and in CI. And one support agent that does everything is
+compared with the two agents on the same golden set.
+
+| Piece | Where | What it does |
+|---|---|---|
+| CI | `.github/workflows/ci.yml` | `check` (lint, typecheck, tests, build on Linux, macOS and Windows) and `eval` (the golden set, Linux) run on every pull request and on pushes to `main`. The `eval` job needs the Actions secrets `GOOGLE_GENERATIVE_AI_API_KEY`, `LANGFUSE_PUBLIC_KEY`, `LANGFUSE_SECRET_KEY` (and `LANGFUSE_BASE_URL`) |
+| Branch protection | repo settings (a ruleset on `main`) | Changes go in only through a pull request; the checks `check (ubuntu-latest)`, `check (macos-latest)`, `check (windows-latest)` and `eval` must pass; no direct pushes, no force pushes |
+| Tracing | `lib/ai/langfuse.ts`, `lib/ai/call.ts`, `lib/copper/assistant/run.ts` | One Langfuse trace per chat turn: a root observation, an `agent` observation for each agent that answers (`copper-agent`, `refund-agent`, or `support-agent`), under it each model call as a `generation` (model, input and output tokens, cost, time) and each tool call as a `tool` (input and output). Handoffs show as the second agent observation. With no Langfuse keys every call is a no-op |
+| Engine | `lib/copper/assistant/run.ts` | The chat engine (`runTurn`), moved out of the Server Action in `ask.ts` so the evals run the same code the chat does. `mode: "single"` runs the single agent |
+| Single agent | `lib/copper/assistant/instructions.ts` (`SINGLE_AGENT_INSTRUCTIONS`), `tools.ts` (`singleAgentTools`) | Copper's instructions plus the refund rules in one prompt, Copper's five tools plus `get_orders` and `request_refund`, and no handoff in either direction. The refund rule is still code in `lib/copper/orders.ts` |
+| Golden set | `evals/golden-set.json`, `lib/evals/golden.ts` | 17 questions in five groups (products, documents, refunds, routing, safety). Each has what a good answer says and does, and rule checks: tools that must or must not be called, and patterns the reply must or must not match |
+| AI judge | `lib/evals/judge.ts` | A second model call reads the conversation, the tools called and the reply and scores **accuracy** and **policy** from 1 to 5. A question passes when its rule checks pass and both scores are at least 4 |
+| Eval runner | `scripts/eval.mts` (`npm run eval`, `npm run eval:compare`) | Runs the golden set, prints a table, saves `evals/results/*.json`, writes the table to the GitHub run summary, and exits 1 when the pass rate is under `EVAL_MIN_PASS_RATE` (0.8). With Langfuse keys the golden set is a Langfuse dataset, each run is a dataset run named `<mode>-<time>`, and `passed`, `rule_checks`, `judge_accuracy`, `judge_policy`, `agent_cost_usd` and `agent_latency_ms` are scores on each answer |
+| AI calls | `{ module: 5, feature: "support-agent" }`, `{ module: 5, feature: "eval-judge" }` | One streamed call per step of the single agent; one judge call per golden-set question (default model, or `EVAL_JUDGE_MODEL`) |
+
+**Data flow:** pull request → GitHub Actions → `check` job and `eval` job →
+`npm run eval` → each golden-set question through `runTurn` (traced in
+Langfuse) → rule checks + AI judge → scores to Langfuse and a pass rate → the
+job passes or fails → branch protection allows or blocks the merge.
+
+**Decisions and trade-offs:** The rule checks run before the judge and must
+pass, so a wrong total or a missing citation fails even if the judge is
+generous. The judge's scores are just a second opinion from a model, not truth;
+its reasoning is saved with each score so a person can overrule it. The
+evaluation uses the real model, so it costs a few cents and can be flaky at
+the edges; the 80% threshold leaves room for one or two unlucky questions
+without letting a real regression through. Tracing wraps `lib/ai/call.ts`
+rather than relying on automatic AI SDK telemetry, so every observation
+(agent, model call, tool call) is named after what Ask Copper does.
+
+**Risks and open questions:** Traces contain customer messages and answers, so
+a real app would mask personal data before sending (the exporter supports
+`mask`). Pull requests from forks don't get Actions secrets, so the eval fails
+there by design. The same model family writes the answers and judges them,
+which can favor its own style; `EVAL_JUDGE_MODEL` lets you pick another.
