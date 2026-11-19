@@ -92,6 +92,15 @@ console.info = (...parts: unknown[]) => {
   originalInfo(...parts);
 };
 
+// Google's free tier allows about 15 requests a minute, and one golden-set
+// question takes 3 to 6 calls. So pace the questions, and when a question hits
+// the limit anyway, wait and try that question again.
+const PACE_MS = Number(process.env.EVAL_PACE_MS ?? "6000");
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+const rateLimited = (r: CaseResult) =>
+  /quota|rate.?limit|429/i.test(r.judgeError ?? "") ||
+  (r.reply.startsWith("Sorry, something went wrong") && !r.toolCalls.length);
+
 const empty = (): Totals => ({ cost: 0, latencyMs: 0, calls: 0 });
 const pct = (n: number, d: number) => (d ? Math.round((100 * n) / d) : 0);
 
@@ -118,15 +127,23 @@ async function runMode(mode: Mode) {
   const total = { agent: empty(), judge: empty() };
 
   const task = async (testCase: (typeof cases)[number]) => {
-    tap = { agent: empty(), judge: empty() };
-    const result = await runCase(testCase, mode, `eval:${mode}`);
-    perCase.set(testCase.id, tap);
-    for (const key of ["agent", "judge"] as const) {
-      total[key].cost += tap[key].cost;
-      total[key].latencyMs += tap[key].latencyMs;
-      total[key].calls += tap[key].calls;
+    let result!: CaseResult;
+    let used = { agent: empty(), judge: empty() };
+    for (let attempt = 1; attempt <= 4; attempt++) {
+      await sleep(attempt === 1 ? PACE_MS : 35_000);
+      tap = { agent: empty(), judge: empty() };
+      result = await runCase(testCase, mode, `eval:${mode}`);
+      used = tap;
+      tap = undefined;
+      if (!rateLimited(result)) break;
+      originalInfo(`  ...${testCase.id} hit the rate limit, retrying`);
     }
-    tap = undefined;
+    perCase.set(testCase.id, used);
+    for (const key of ["agent", "judge"] as const) {
+      total[key].cost += used[key].cost;
+      total[key].latencyMs += used[key].latencyMs;
+      total[key].calls += used[key].calls;
+    }
     results.push(result);
     const mark = result.passed ? "PASS" : "FAIL";
     originalInfo(`  ${mark}  ${mode.padEnd(10)} ${testCase.id}`);

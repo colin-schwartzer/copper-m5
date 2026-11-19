@@ -28,6 +28,7 @@ export function isLangfuseConfigured(): boolean {
 }
 
 let processor: LangfuseSpanProcessor | undefined;
+let provider: NodeTracerProvider | undefined;
 
 /** Starts the exporter once. Its own tracer provider, so it never fights Next.js's. */
 function ensureTracing(): boolean {
@@ -42,16 +43,20 @@ function ensureTracing(): boolean {
       // Export every observation we create, and nothing else.
       shouldExportSpan: () => true,
     });
-    setLangfuseTracerProvider(
-      new NodeTracerProvider({ spanProcessors: [processor] }),
-    );
+    provider = new NodeTracerProvider({ spanProcessors: [processor] });
+    setLangfuseTracerProvider(provider);
   }
   return true;
 }
 
 /** Turns tracing on now (scripts do this before they start their own traces). */
 export function enableTracing(): boolean {
-  return ensureTracing();
+  if (!ensureTracing()) return false;
+  // Also make it the global provider, so Langfuse experiments see it and each
+  // chat turn nests under the experiment item it answers. Next.js's own
+  // provider is left alone: only scripts call this.
+  provider?.register();
+  return true;
 }
 
 /** Sends any traces still waiting. Call at the end of a turn or a script. */
