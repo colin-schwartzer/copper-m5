@@ -8,6 +8,7 @@ import {
   MODELS,
   type ModelId,
 } from "@/lib/ai/models";
+import { startGeneration, type TraceParent } from "@/lib/ai/langfuse";
 import { costUsd } from "@/lib/ai/pricing";
 
 // Every model call in the app goes through this file, so each one is logged
@@ -27,8 +28,17 @@ export function isAiConfigured(): boolean {
   return Boolean(process.env.GOOGLE_GENERATIVE_AI_API_KEY);
 }
 
-/** Which module and feature made the call, for the ai_calls log. */
-export type CallInfo = { module: number; feature: string; model?: ModelId };
+/**
+ * Which module and feature made the call, for the ai_calls log. `trace` is the
+ * Langfuse agent or turn the call belongs to (Module 5); without it the call
+ * gets a trace of its own.
+ */
+export type CallInfo = {
+  module: number;
+  feature: string;
+  model?: ModelId;
+  trace?: TraceParent;
+};
 
 // Omit that keeps generateText's "prompt or messages" union intact.
 type DistributiveOmit<T, K extends PropertyKey> = T extends unknown
@@ -95,25 +105,71 @@ function rowFor(info: CallInfo, model: ModelId, started: number) {
   };
 }
 
-async function tracked<T extends { usage: Usage }>(
+/** Finishes a Langfuse generation with the same numbers as the ai_calls row. */
+function endGeneration(
+  generation: ReturnType<typeof startGeneration>,
+  row: AiCallRow,
+  output?: string,
+  error?: unknown,
+) {
+  if (!generation) return;
+  try {
+    generation
+      .update({
+        output,
+        usageDetails:
+          row.input_tokens !== null && row.output_tokens !== null
+            ? { input: row.input_tokens, output: row.output_tokens }
+            : undefined,
+        costDetails:
+          row.cost_usd !== null ? { total: row.cost_usd } : undefined,
+        level: row.ok ? "DEFAULT" : "ERROR",
+        statusMessage: error
+          ? error instanceof Error
+            ? error.message
+            : String(error)
+          : undefined,
+      })
+      .end();
+  } catch {
+    // Tracing must never break a call.
+  }
+}
+
+async function tracked<T extends { usage: Usage; text: string }>(
   info: CallInfo,
+  traceInput: unknown,
   run: (model: ModelId) => Promise<T>,
 ): Promise<T> {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
+  const generation = startGeneration(info.trace, {
+    name: info.feature,
+    model,
+    input: traceInput,
+    metadata: { module: info.module },
+  });
   try {
     const result = await run(model);
-    await logCall(row(true, result.usage));
+    const logged = row(true, result.usage);
+    await logCall(logged);
+    endGeneration(generation, logged, result.text);
     return result;
   } catch (error) {
     if (!(error instanceof AiNotConfiguredError)) await logCall(row(false));
+    endGeneration(generation, row(false), undefined, error);
     throw error;
   }
 }
 
+/** What went into a call, for the trace: its messages or its prompt. */
+function promptOf(options: { messages?: unknown; prompt?: unknown }) {
+  return options.messages ?? options.prompt;
+}
+
 /** Generates text. Example: callText({ module: 3, feature: "support-answer" }, { prompt }) */
 export async function callText(info: CallInfo, options: TextOptions) {
-  return tracked(info, (model) =>
+  return tracked(info, promptOf(options), (model) =>
     generateText({ ...options, model: languageModel(model) }),
   );
 }
@@ -124,7 +180,7 @@ export async function callObject<Schema extends z.ZodType>(
   options: TextOptions & { schema: Schema },
 ) {
   const { schema, ...rest } = options;
-  const result = await tracked(info, (model) =>
+  const result = await tracked(info, promptOf(rest), (model) =>
     generateText({
       ...rest,
       model: languageModel(model),
@@ -145,9 +201,15 @@ export async function callEmbedMany(
   values: string[],
 ) {
   const started = performance.now();
+  const generation = startGeneration(info.trace, {
+    name: info.feature,
+    model: EMBEDDING_MODEL,
+    input: values,
+    metadata: { module: info.module },
+  });
   // Google doesn't report tokens for embeddings, so tokens and cost are null.
-  const log = (ok: boolean) =>
-    logCall({
+  const log = (ok: boolean) => {
+    const row: AiCallRow = {
       module: info.module,
       feature: info.feature,
       model: EMBEDDING_MODEL,
@@ -157,7 +219,10 @@ export async function callEmbedMany(
       latency_ms: Math.round(performance.now() - started),
       ok,
       created_at: new Date().toISOString(),
-    });
+    };
+    endGeneration(generation, row);
+    return logCall(row);
+  };
   try {
     const result = await embedMany({
       model: google().embedding(EMBEDDING_MODEL.slice("google/".length)),
@@ -187,11 +252,24 @@ type StreamOptions = DistributiveOmit<
 export function callStream(info: CallInfo, options: StreamOptions) {
   const model = info.model ?? defaultModel();
   const row = rowFor(info, model, performance.now());
+  const generation = startGeneration(info.trace, {
+    name: info.feature,
+    model,
+    input: promptOf(options),
+    metadata: { module: info.module },
+  });
   return streamText({
     ...options,
     model: languageModel(model),
-    onFinish: ({ totalUsage }) => logCall(row(true, totalUsage)),
-    onError: () => logCall(row(false)),
+    onFinish: ({ totalUsage, text }) => {
+      const logged = row(true, totalUsage);
+      endGeneration(generation, logged, text);
+      return logCall(logged);
+    },
+    onError: ({ error }) => {
+      endGeneration(generation, row(false), undefined, error);
+      return logCall(row(false));
+    },
   });
 }
 

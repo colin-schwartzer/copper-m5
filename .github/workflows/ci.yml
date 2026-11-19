@@ -1,8 +1,12 @@
 name: CI
 
+# Module 5: every pull request runs the app's tests and the golden-set eval.
+# `main` is protected (see docs/architecture.md, "Module 5"): a change gets in
+# only through a pull request whose checks below all pass.
 on:
-  push:
   pull_request:
+  push:
+    branches: [main]
 
 jobs:
   check:
@@ -23,3 +27,27 @@ jobs:
       - run: npm run typecheck
       - run: npm test
       - run: npm run build
+
+  # The golden set: real questions through Ask Copper, graded by an AI judge.
+  # Needs these Actions secrets: GOOGLE_GENERATIVE_AI_API_KEY,
+  # LANGFUSE_PUBLIC_KEY, LANGFUSE_SECRET_KEY (and optionally LANGFUSE_BASE_URL).
+  # Scores land in Langfuse and in this run's summary. It fails the check when
+  # fewer than EVAL_MIN_PASS_RATE (default 0.8) of the questions pass.
+  eval:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      GOOGLE_GENERATIVE_AI_API_KEY: ${{ secrets.GOOGLE_GENERATIVE_AI_API_KEY }}
+      LANGFUSE_PUBLIC_KEY: ${{ secrets.LANGFUSE_PUBLIC_KEY }}
+      LANGFUSE_SECRET_KEY: ${{ secrets.LANGFUSE_SECRET_KEY }}
+      LANGFUSE_BASE_URL: ${{ secrets.LANGFUSE_BASE_URL }}
+      LANGFUSE_TRACING_ENVIRONMENT: ci
+      EVAL_MIN_PASS_RATE: "0.8"
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+      - run: npm ci
+      - run: npm run eval
