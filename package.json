@@ -17,7 +17,8 @@
     "env:check": "node scripts/check-env.mjs",
     "embed-docs": "node scripts/embed-docs.mjs",
     "eval": "tsx scripts/eval.mts",
-    "eval:compare": "tsx scripts/eval.mts --mode=both"
+    "eval:compare": "tsx scripts/eval.mts --mode=both",
+    "demo-trace": "tsx scripts/demo-trace.mts"
   },
   "dependencies": {
     "@ai-sdk/google": "4.0.93",

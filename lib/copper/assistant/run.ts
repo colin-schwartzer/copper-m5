@@ -58,6 +58,8 @@ export type AskCopperRequest = {
   sessionId?: string;
   /** Names this run in Langfuse, like "eval:golden-set". Chats leave it out. */
   traceName?: string;
+  /** Share the Langfuse trace of this turn with anyone who has the link. */
+  publicTrace?: boolean;
 };
 
 export type AskCopperResult = {
@@ -147,6 +149,7 @@ export async function runTurn({
   mode = "two-agents",
   sessionId,
   traceName = "ask-copper-turn",
+  publicTrace,
 }: AskCopperRequest): Promise<AskCopperResult> {
   const { live, update, done } = createLive<Progress>();
   const single = mode === "single" && Boolean(desk) && useTools;
@@ -160,6 +163,7 @@ export async function runTurn({
     sessionId,
     tags: [single ? "single-agent" : "two-agents"],
     metadata: { mode: single ? "single" : "two-agents", useTools },
+    public: publicTrace,
   });
   const toolSpans = new Map<string, LangfuseTool | undefined>();
   const progress: Progress = {
